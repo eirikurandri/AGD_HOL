@@ -1,0 +1,884 @@
+title: "AGD_analysis_condensed"
+1. Setting library dependencies and define some pallets
+```{r cars}
+library(phyloseq); packageVersion("phyloseq")
+library(Biostrings); packageVersion("Biostrings")
+library(tidyverse)
+library(janitor)
+library(ggplot2); packageVersion("ggplot2")
+library(iNEXT); packageVersion("iNEXT")
+library(ape); packageVersion("ape")
+library(vegan); packageVersion("vegan")
+library(dplyr); packageVersion("dplyr")
+library(cowplot); packageVersion("cowplot")
+library(plyr); packageVersion("plyr")
+library(data.table); packageVersion("data.table")
+library(hilldiv);packageVersion("hilldiv")
+library(car);packageVersion("car")
+library(lme4);packageVersion("lme4")
+library(RColorBrewer);packageVersion("RColorBrewer")
+library("ape")
+library(patchwork)
+library(ggpubr)
+library(rstatix)
+library(forcats)
+library(ggtext)
+library(showtext)
+library(extrafont)
+library(ComplexHeatmap)
+library(colorRamp2)
+library(ggsankey)
+
+
+#define some palettes
+ugly<- c("#C15444","#C1B244","#26736A","#C17A44","#2D8652","#2E428A","#A83861","#BEE0E9","#D4C57D","#4D3619","#883091","#B3B4E6","#CDCF6E","#6ECFA8","#1F1F1F","#5E5E5E","#0E220B","#CD936A","#62CB8C","#C65353","#C6BA53","#4FB3C4","#8FC757","#6B4424","#EC453C","#F4A590","#D6F7AB","#78F297", "#310E8B","#EA462A")
+
+childish <- c("#B71C1C","#FFC107","#A7FFEB","#FFB74D","#757575","#FF5252","#BA68C8","#8BC34A","#F57F17","#009688","#FF80AB","#304FFE","#455A64","#69F0AE","#FF5722","#9C640C","#F1C40F","#A93226","#76448A","#17A589","#C6BA53","#4FB3C4","#8FC757","#6B4424","#EC453C","#F4A590","#D6F7AB","#78F297", "#310E8B","#EA462A")
+```
+
+2. Prep data for phyloseq import
+```{r}
+#Read in the metadata,ASV_table and taxonmoic assignments of ASVs
+meta <- read.csv("metadata.csv" , sep=",",stringsAsFactors = TRUE)
+##Load clean  and curated ASV table
+asv.tab <- read.csv("Curated_Table.txt",sep=",")
+##load clean and curated taxonomy associated with ASVs
+asv.taxa <- read.csv("Curated_Tax.csv",sep=",")
+
+#Make some new descriptive variables and make sure things are neat-ish
+meta <- meta %>% mutate(mngill=as.numeric(as.vector(mean_gill_score)),Ct = as.numeric(as.vector(Ct)))
+seq1 <- seq(3,4,by=0.25)
+seq2 <- seq(30,35,by=0.01)
+meta <- meta %>% mutate(ct_group = ifelse(Ct>35,"Ct>35",ifelse(Ct %in% seq2,"30<Ct<35",ifelse(Ct<30,"Ct<30",NA))))
+meta <- meta %>% mutate(gill_group2 = ifelse(mngill>=3.5,"MODERATE-ADVANCED","LIGHT-MODERATE"))
+meta$Weight <- as.numeric(as.character(meta$Weight))
+meta$Length <- as.numeric(as.character(meta$Length))
+
+#Reorder the data so they fit the phyloseq dependencies
+rownames(meta) <- colnames(asv.tab)
+rownames(asv.taxa) <- rownames(asv.tab)
+```
+3. Determine which taxonomic rank is appropriate for analysis in phyloseq
+```{r}
+prop.na <- function(tax_tab,Rank,asv_tab){
+  filt <- tax_tab  %>% filter(is.na(tax_tab[,Rank])) %>% rownames(.)
+  prop <- asv_tab %>% filter(rownames(.) %in% filt) 
+  sum <- sum(rowSums(prop))/sum(rowSums(asv_tab))
+  print(sum)
+  paste(round(sum*100,digits = 3),"%")}
+#make another function which does the same thing for every rank
+table.prop.na <- function(Rank,asv_tab,taxa_tab){
+  df <- data.frame()
+  for(tax_rank in Rank){
+    a<- as.data.frame(cbind(prop.na(taxa_tab,tax_rank,asv_tab),tax_rank,no_ASV=sum(is.na(taxa_tab[,tax_rank])))) %>% 
+      mutate(percent_ASV_NA = V1) %>% 
+      select(-V1)
+    df <-  rbind(a,df)
+  }
+  print(df)
+}
+#list the ranks you want to check
+rank <- c(colnames(asv.taxa))
+#run the function
+lol <- table.prop.na(rank,asv.tab,asv.taxa)
+lol
+#stuff for saving the table if wanted
+# save_as_docx("my table 1" = lol,path = "lol.docx")
+```
+We see that a whopping 35% of the total abundance of ASVs are not assigned a genus level so we decide to merge the ASVs in a higer tax-rank and decide to merge on the Family level
+
+4."Import" into phyloseq and use it for filtering out unwanted stuff and normalising
+```{r}
+#Create first phyloseq object
+ps <- phyloseq(otu_table(asv.tab, taxa_are_rows=TRUE),
+               tax_table(as.matrix(asv.taxa)),
+               sample_data(meta))
+
+#subset the phyloseq object so it only contains the samples that have both been assigned a Ct value and a gill score
+ps <- ps %>% 
+  subset_samples(Sample_orf_control != "CONTROL_SAMPLE") %>%
+  subset_samples(Ct!="") %>%
+  subset_samples(mngill!="")
+
+#filter chloroplast, mitochondria and Eukariotic assigned taxa
+ps <- ps %>% subset_taxa(.,Kingdom!="Eukaryota"|is.na(Kingdom)) %>%    subset_taxa(.,Order!="Chloroplast"|is.na(Order)) %>% 
+subset_taxa(.,Family!="Mitochondria"|is.na(Family))
+
+#agglomerate unrarefied dataset on the Family level
+physeq = tax_glom(ps, "Family",NArm = FALSE)
+
+## Create tree
+random_tree = rtree(ntaxa(physeq), rooted=TRUE, tip.label=taxa_names(physeq))
+#merge the tree to the physeq object
+physeq = merge_phyloseq(physeq, random_tree)
+
+#take a look at a histogram of the samåple_sums and decide on a cutoff
+
+#filter filter samples with lower than 2500 reads (based on a rarefaction curve)
+physeq_filt = prune_samples(sample_sums(physeq) >= 2500, physeq)
+#Create phyloseq object with sample based relative abundances of taxa (proportions)
+physeq_norm = transform_sample_counts(physeq_filt, function(x) x/sum(x))
+physeq_norm = phyloseq::filter_taxa(physeq_norm, function(x) var(x) > 0, TRUE)
+
+```
+4. prep stuff for sankey plot for families over 1%in abundance
+```{r}
+
+#first identify the taxa that contribute over 1% of the abundance
+top_taxa <- psmelt(physeq_norm)
+top_table <- top_taxa %>%
+  group_by(OTU) %>%
+  summarize(TotalRelativeAbundance = sum(Abundance, na.rm = TRUE)) %>%  # Sum relative abundances across samples
+  mutate(Percentage = 100 * TotalRelativeAbundance / sum(TotalRelativeAbundance)) %>%  # Calculate percentage of total
+  filter(Percentage > 1) %>%  # Filter taxa contributing >1% of the total
+  inner_join(unique(top_taxa[, c("OTU", "Kingdom", "Phylum", "Class", "Order", "Family")]), 
+             by = "OTU") %>%
+  mutate(Family = fct_reorder(Family, desc(Percentage)))
+
+top_table
+
+#Set the levels for the sankey plot for aeasthetics extremely boring but the only thing I could think off sorry...
+lev <- c("Bacteria","Campylobacterota","Campylobacteria","Campylobacterales","Arcobacteraceae","Verrucomicrobiota","Chlamydiae","Chlamydiales","Simkaniaceae","Verrucomicrobiae","Verrucomicrobiales","Rubritaleaceae","Proteobacteria","Gammaproteobacteria","Pseudomonadales","Marinomonadaceae","Pseudomonadaceae","Enterobacterales","Vibrionaceae","Pseudoalteromonadaceae","Enterobacteriaceae","Burkholderiales","Comamonadaceae","Alphaproteobacteria","Rhodobacterales","Rhodobacteraceae","Sphingomonadales","Sphingomonadaceae","Chitinophagales","Saprospiraceae","Bacteroidota","Bacteroidia","Flavobacteriales","Flavobacteriaceae")
+
+#we know its the top 13 taxa so we filter for them
+TopNOTUs = names(sort(taxa_sums(physeq_norm),TRUE)[1:13]) 
+physeq_13 = prune_taxa(TopNOTUs, physeq_norm)
+top_taxa_13 <- psmelt(physeq_13) # get it in non pyloseq format yay
+#Sankeytime
+tableforsankey <-
+  top_taxa_13 %>%
+  make_long(Kingdom, Phylum, Class, Order, Family, value = Abundance) %>%
+  mutate(node = factor(node, levels = lev, ordered = TRUE), 
+          next_node = factor(next_node, levels = lev, ordered = TRUE))
+
+tax_sankey <- ggplot(tableforsankey, 
+       aes(x = x,
+           next_x = next_x,
+           node = node,
+           next_node = next_node,
+           fill = factor(node),
+           label = node,value=value)) + 
+    geom_sankey(flow.alpha = 0.9,node_fill="#E3D7BD",size=0.05) +
+    geom_sankey_label(family="Roboto Condensed",color="grey36",fill="white",size=5,fontface="bold") +
+    theme_sankey(base_size = 16) +
+    theme(legend.position = "none", axis.text = element_text(size = 16,face = "bold",family="Roboto Condensed")) +
+    xlab("") + scale_fill_hue(c=40,l=70)
+tax_sankey #this sankey looks shit but its fine
+```
+5. Alpha diversities(using hill numbers)
+```{r}
+#prepare the ASV table to be used for the phylogenoic (Family level diversity)
+
+physeq_alpha <- subset_samples(physeq,mngill!="")
+physeq_alpha <- subset_samples(physeq_alpha,Ct!="")
+physeq_alpha <- prune_taxa(taxa_sums(physeq_alpha) > 0, physeq_alpha)
+asv_alpha <- as.data.frame(physeq_alpha@otu_table)
+
+
+#associate sample to approprate group (start with gill score)
+#First phylogenetic 
+sample_groups <- as.data.frame(as.matrix(physeq_alpha@sam_data))
+  sample_groups <- sample_groups %>% mutate(sample =rownames(sample_groups)) %>% 
+  select("sample","ct_group")
+  
+  f_richness <- div_test(asv_alpha,hierarchy = sample_groups,q=0,posthoc = TRUE)
+  f_Shannon <- div_test(asv_alpha,hierarchy = sample_groups,q=1,posthoc = TRUE)
+  f_Simpson <- div_test(asv_alpha,hierarchy = sample_groups,q=2,posthoc = TRUE)
+#Just set the posthost=TRUE on the one thats actually significant otherwise R wont like it
+# z is just a different version of the function div_test_plot() (just use that one instead)
+g <- z(f_richness,threshold=0.05,col=childish[5:7],chart="violin") + 
+  labs(y="(q=0)",x="") + geom_jitter(color="grey36",alpha=0.5)
+
+o <- z(f_Shannon,threshold=0.05,col=childish[5:7],chart="violin",posthoc = TRUE) + labs(y="(q=1)",x="") + geom_jitter(color="grey36",alpha=0.5)
+
+b <- z(f_Simpson,threshold=0.05,col=childish[5:7],chart="violin",posthoc=TRUE) + labs(y="(q=2)",x="")  + geom_jitter(color="grey36",alpha=0.5)
+#Repeat for gill damage
+  sample_groups <- as.data.frame(as.matrix(physeq_alpha@sam_data))
+  sample_groups <- sample_groups %>% mutate(sample =rownames(sample_groups)) %>% 
+  select("sample","gill_group2")
+  
+  f_richness <- div_test(asv_alpha,hierarchy = sample_groups,q=0,posthoc = TRUE)
+  f_Shannon <- div_test(asv_alpha,hierarchy = sample_groups,q=1,posthoc = TRUE)
+  f_Simpson <- div_test(asv_alpha,hierarchy = sample_groups,q=2,posthoc = TRUE)
+# z is just a different version of the function div_test_plot() (just use that one instead)
+t <- z(f_richness,threshold=0.05,col=childish,chart="violin") + labs(y="(q=0)",x="") + geom_jitter(color="grey36",alpha=0.5)
+
+m <- z(f_Shannon,threshold=0.05,col=childish,chart="violin") +labs(y="(q=1)",x="") + geom_jitter(color="grey36",alpha=0.5)
+
+d <- z(f_Simpson,threshold=0.05,col=childish,chart="violin") + labs(y="(q=2)",x="")  + geom_jitter(color="grey36",alpha=0.5)
+
+#Now plot it
+p1 <- g/o/b + plot_layout(axes="collect_x")
+p2 <- t/m/d + plot_layout(axes="collect_x")
+
+
+plot_alpha <- (p1|p2) +
+    plot_annotation(title = "Effective number of taxa",
+                    subtitle = "Using the Hill numbers framework and orders of diversity(q)",
+                    tag_levels = "A") &
+    theme(text = element_text(color="grey36",family="Roboto Condensed"),
+          axis.text.x = element_text(face="bold",angle=45,color="grey36",family="Roboto Condensed"),
+          axis.text.y = element_text(color="grey36",face="bold",family="Roboto Condensed"),
+          axis.ticks = element_line(color="grey36"),
+          axis.line = element_line(color="grey36"),
+          axis.title = element_text(face="bold",color="grey36"), 
+          legend.position = "none",
+          legend.text = element_text(face="bold",color="grey36"),
+          legend.title = element_text(face="bold",color="grey36"),
+          plot.title = element_text(face="bold",color="grey36",size=18),
+          plot.subtitle = element_text(face="bold",color="grey36",size=12))
+plot_alpha
+
+#If wanted you can also do it for the ASV level then you just basically do everything the same as above except the start is using the ps object rather than the one merged on the family level
+#ps_filt <- prune_taxa(taxa_sums(ps) > 0, ps)
+#asv_alpha_asv <- as.data.frame(ps_filt@otu_table)
+```
+6. Beta diversities (using bray curtis distance) We did this with other distance metrics as well but it wont change much
+```{r}
+#do bray-curtis ordination
+ordi_bray <- ordinate(physeq_norm,"PCoA","bray")
+#plottin time
+sample_data(physeq_norm)$ct_group <- factor(sample_data(physeq_norm)$ct_group,levels=c("Ct<30","30<Ct<35","Ct>35"))
+sample_data(physeq_norm)$gill_group2 <- factor(sample_data(physeq_norm)$gill_group2,levels=c("LIGHT-MODERATE","MODERATE-ADVANCED"))
+
+pordi_bray_gs <- plot_ordination(physeq_norm,ordi_bray,type="Samples",color="gill_group2") + 
+  stat_ellipse() +
+  geom_point(size=4) +
+  labs(subtitle = "Samples grouped by gill damage") +
+  theme_cowplot() + 
+theme(text = element_text(color="grey36",family="Roboto Condensed"),
+          axis.text.x = element_text(face="bold",color="grey36",family="Roboto Condensed",size=15),
+          axis.text.y = element_text(face="bold",color="grey36",family="Roboto Condensed",size=15),
+          axis.ticks = element_line(color="grey36"),
+          axis.line = element_line(color="grey36"),
+          axis.title = element_text(face="bold",color="grey36"),
+          legend.text = element_text(face="bold",color="grey36",size=12),
+          legend.title = element_text(face="bold",color="grey36",size=12),
+          plot.subtitle = element_text(face="bold",color="grey36",size=15),
+      legend.position = "top") +
+  scale_color_manual(values=childish,name="Gill score class:")+
+  annotate(geom="text",x=0.2,y=0.55,label="PERMANOVA,R2=0.057,p=0.003**",size=3,fontface=2,color="grey36")
+
+
+pordi_bray_al <- plot_ordination(physeq_norm,ordi_bray,type="Samples",color="ct_group") + 
+  stat_ellipse() +
+  geom_point(size=4,aes(group=desc("ct_group"))) + 
+  labs(subtitle = "Samples grouped by amoebic load (Ct)") +
+  theme_cowplot() +
+  theme(text = element_text(color="grey36",family="Roboto Condensed"),
+          axis.text.x = element_text(face="bold",color="grey36",family="Roboto Condensed",size=15),
+          axis.text.y = element_text(face="bold",color="grey36",family="Roboto Condensed",size=15),
+          axis.ticks = element_line(color="grey36"),
+          axis.line = element_line(color="grey36"),
+          axis.title = element_text(face="bold",color="grey36"),
+          legend.text = element_text(face="bold",color="grey36",size=12),
+          legend.title = element_text(face="bold",color="grey36",size=12),
+          plot.subtitle = element_text(face="bold",color="grey36",size=15),
+      legend.position = "top") +
+  scale_color_manual(values=childish[5:7],name="AMOEBIC LOAD CT") + 
+  annotate(geom="text",x=0.2,y=0.55,label="PERMANOVA=NS",size=3,fontface=2,color="grey36")
+
+plot_beta <- pordi_bray_al+pordi_bray_gs
+plot_beta
+#Now some lovely PERMANOVAs
+adonis2(t(data.frame(physeq_norm@otu_table))~gill_group2,data=data.frame(as.vector(physeq_norm@sam_data)),method="bray")
+adonis2(t(data.frame(physeq_norm@otu_table))~ct_group,data=data.frame(as.vector(physeq_norm@sam_data)),method="bray")
+#do beta dispertion
+bray_dist <- phyloseq::distance(physeq_norm,method = "bray")
+gill_beta <- betadisper(bray_dist,data.frame(as.vector(physeq_norm@sam_data))$gill_group2)
+ct_beta <- betadisper(bray_dist,data.frame(as.vector(physeq_norm@sam_data))$ct_group)
+permutest(gill_beta)
+# oh well, we move on 
+permutest(ct_beta)
+#can also make the main big plot if desired
+#p3 <- (tax_sankey/plot_beta) + plot_layout(heights = c(2,1.5))
+#div_plot <- (plot_alpha + p3) + plot_layout(widths = c(0.5,0.5,2))
+#ggsave("div_plot.svg", plot = div_plot, device = "svg", width = 15, height = 10, units = "in")
+```
+6. Microbiota composition and differential abundances (relative abundances)
+```{r}
+#Lets start with differential abundance analysis on the family level we focus on the familes constituting over
+#1% of the total abundance since those are the ones we´ve picked as the taxa of interest.
+#Lets start with differential aubndance using wilcoxon test and adjust the p-values
+#for gill grous
+wilc <- psmelt(physeq_13)
+wilc_gill <- wilc %>% nest(data=-OTU) %>% 
+  mutate(test=map(.x=data,~wilcox.test(Abundance~gill_group2,data=.x) %>% tidy))%>% 
+  unnest(test) %>% 
+  mutate(p.adjust= p.adjust(p.value,method="bonferroni")) %>% 
+  add_significance()
+#since I don´t really like wilcox (although its usefule here I complement it with ancombc, which I think I have set up correctly
+physeq_stat_test <- phyloseq::filter_taxa(physeq_filt, function(x) var(x) > 0, TRUE)
+out <- ancombc(data=physeq_stat_test, formula="gill_group2",p_adj_method = "fdr")
+results_ancom_bc = data.frame(ASV = rownames(out$res$lfc),
+                              lcf = out$res$lfc$`gill_group2MODERATE-ADVANCED`, 
+                              W = out$res$W$`gill_group2MODERATE-ADVANCED`, 
+                              p_val = out$res$p_val$`gill_group2MODERATE-ADVANCED`,
+                              q_value = out$res$q_val$`gill_group2MODERATE-ADVANCED`, 
+                      Diff_ab =  out$res$diff_abn$`gill_group2MODERATE-ADVANCED`)
+#View(results_ancom_bc)
+#The Simkaniaceae is the only Significantly diffrent family among samples based on gill group in both wilcox and ancombc
+#For ct_group
+wilc_ct <- wilc %>% nest(data=-OTU) %>% mutate(test=map(.x=data,~wilcox.test(.x$Abundance,.x$ct_group,data=.x) %>% tidy)) %>% unnest(test) %>% mutate(p.adjust= p.adjust(p.value,method="BH")) 
+#No significantly different taxa based on adjusted p value for the groups also did ancombc for this and the results were the same just no need to copy the code here since the one above can be modified
+
+#lets pop some plots in here
+ps_dif_ab <- psmelt(physeq_13) %>% 
+    filter(OTU=="ASV_1") %>%
+    ggplot(aes(gill_group2, Abundance, fill = gill_group2, color = gill_group2)) + 
+    geom_violin(alpha = 0.7) + 
+    geom_boxplot(alpha=0.1,color="grey36",width=0.1,size=1) +
+    geom_jitter(col = "grey36", alpha = 0.5) +
+    scale_color_manual(values=childish) +
+    scale_fill_manual(values=childish) +
+    theme_cowplot() +  
+    stat_compare_means(method = "wilcox.test") +
+    labs(title="Simkaniaceae relative abundance") +
+    theme(text = element_text(color="grey36",family="Roboto Condensed"),
+          axis.text.x = element_text(face="bold",color="grey36",family="Roboto Condensed",size=15),
+          axis.text.y = element_text(face="bold",color="grey36",family="Roboto Condensed",size=15),
+          axis.title.y = element_text(face="bold",color="grey36",family="Roboto Condensed",size=15),
+          axis.ticks = element_line(color="grey36"),
+          axis.line = element_line(color="grey36"),
+          axis.title = element_blank(),
+          legend.position="none",
+          title = element_text(face="bold",color="grey36",family="Roboto Condensed",size=15)) 
+ps_dif_ab
+#Lets have a look at amoebic load and the relative abundance of Simkaniaceae which
+titi <- wilc %>% filter(OTU=="ASV_1") %>% mutate(lo=-log2(Abundance)) %>% mutate(loct=-log2(Ct)) %>% mutate(s=sqrt(Abundance))
+#do a quick model
+model <- glm(lo~Ct,data=titi,family = "Gamma")
+summary(model)
+#plot the correlation
+ps_cor_plot <- psmelt(physeq_13) %>% 
+    filter(OTU=="ASV_1") %>%
+    ggplot(aes(Ct, -log2(Abundance))) + 
+  geom_point(color="grey36",alpha=0.8) +
+  geom_smooth(method="lm",color="#FFB74D") +
+  stat_cor(method="pearson") +
+  labs(y="-log2 Simkaniaceae",x="Amoebic load(Ct)") +
+    theme_cowplot() +
+  theme(text = element_text(color="grey36",family="Roboto Condensed"),
+          axis.text.x = element_text(face="bold",color="grey36",family="Roboto Condensed",size=10),
+          axis.text.y = element_text(face="bold",color="grey36",family="Roboto Condensed",size=10),
+        axis.title = element_text(face="bold",color="grey36",family="Roboto Condensed",size=15),
+          axis.ticks = element_line(color="grey36"),
+          axis.line = element_line(color="grey36")) 
+ps_cor_plot
+#for funsies we also do the lame barplots
+plot_genus_norm = plot_bar(physeq_13, "Sample_ID", fill = "Family") + 
+  geom_bar(aes(color=Family, fill=Family), stat="identity", position="stack") +
+  theme_cowplot() +
+  theme(text = element_text(colour = "grey40",face = "bold",family="Roboto Condensed"),
+    axis.text.x = element_text(angle = 90),
+    strip.text.x = element_text(colour = "grey40",face = "bold"),
+    strip.background = element_blank(),
+    legend.text = element_text(colour = "grey40",face = "italic")) +
+  labs(x = "Samples") +
+  labs(y = "Relative Abundance") + 
+  scale_fill_manual(values=ugly) +
+  scale_color_manual(values=ugly) 
+ct_group_bar <- plot_genus_norm + ggforce::facet_row(~ct_group,space="free",scales="free_x")
+gill_group_bar <- plot_genus_norm + ggforce::facet_row(~gill_group2,space="free",scales="free_x")
+barplot_fam <- (ct_group_bar/ gill_group_bar) + plot_annotation(tag_levels="A") 
+barplot_fam
+#save it if you are so inclined
+#ggsave("bar_plot.svg", plot = barplot_fam, device = "svg", width = 15, height = 10, units = "in")
+
+#Lets now get the clustering in the Complexheatmap going this is not fun but hey totally worth it amirit
+mat <- (otu_table(physeq_13))
+#add a pseucount for log transformation (sorry)
+mat_log <- -log2(mat + 1e-6)
+#set colors for the heatmap
+col_fun = colorRamp2(c(min(mat_log), 4.5, mean(mat_log), max(mat_log)), c("goldenrod","gold","white", "black"))
+#set annotation for the plot with the Ct values and mean gill score overlaid.
+# Extract the sample data from the phyloseq object
+sample_data <- sample_data(physeq_13)
+
+# Extract the Ct and mngill variables from the sample data
+Ct <- sample_data$ct_group
+mngill <- sample_data$gill_group2
+
+# Ensure the variables are in the same order as the samples in the phyloseq object
+Ct <- Ct[match(colnames(mat), sample_names(physeq_norm))]
+mngill <- mngill[match(colnames(mat), sample_names(physeq_norm))]
+
+#Create annotation
+row_ht <- columnAnnotation('Amoebic load' = Ct, 
+                           "Gill score" = mngill,
+                           col = list('Amoebic load' = c("Ct<30" = "#757575", 
+                                                         "30<Ct<35" = "#FF5252", 
+                                                         "Ct>35" = "#BA68C8"),
+                                      "Gill score"=c("LIGHT-MODERATE" = "#B71C1C", 
+                                                     "MODERATE-ADVANCED" = "#FFC107")),
+                           annotation_name_gp = gpar(fontsize = 8, 
+                                     fontface = "bold", 
+                                     col = "grey36",
+                                     fontfamily="Roboto Condensed"),
+                           annotation_legend_param=list(
+  'Amoebic load'=list(labels_gp = gpar(fontsize = 8, 
+                                     fontface = "bold", 
+                                     col = "grey36",
+                                     fontfamily="Roboto Condensed"),
+                    title_gp = gpar(fontsize = 8, 
+                                     fontface = "bold", 
+                                     col = "grey36",
+                                     fontfamily="Roboto Condensed"),
+                    legend_gp=gpar(fontsize = 8, 
+                                     fontface = "bold", 
+                                     col = "grey36",
+                                     fontfamily="Roboto Condensed"),
+                    nrow=1),
+  "Gill score"=list(labels_gp = gpar(fontsize = 8, 
+                                   fontface = "bold", 
+                                   col = "grey36",
+                                   fontfamily="Roboto Condensed"),
+                  title_gp = gpar(fontsize = 8, 
+                                     fontface = "bold", 
+                                     col = "grey36",
+                                     fontfamily="Roboto Condensed"),
+                  legend_gp=gpar(fontsize = 8, 
+                                     fontface = "bold", 
+                                     col = "grey36",
+                                     fontfamily="Roboto Condensed"))),
+  simple_anno_size_adjust=TRUE)
+
+#Now get the taxonomic information to replace the ASV_names
+tax_table <- tax_table(physeq_13)
+
+# Extract the family level taxonomy
+family_names <- tax_table[, "Family"]
+
+# Replace the rownames of mat_log with the family names
+rownames(mat_log) <- family_names
+
+# add the annotation to the original heatmap
+ht <- Heatmap(mat_log, name = "-log2 relative abundance", 
+        col = col_fun,
+        cluster_rows = TRUE,
+        cluster_columns = TRUE,
+        clustering_distance_rows = "euclidean",
+        clustering_distance_columns = "euclidean",
+        clustering_method_rows = "complete",
+        clustering_method_columns = "complete",
+        column_title = "Samples", 
+        row_title = "Family", 
+        bottom_annotation = row_ht,
+        show_column_names = FALSE,
+        row_names_gp = gpar(fontsize = 10, 
+                            fontface = "italic", 
+                            col = "grey36",
+                            fontfamily="Roboto Condensed"),
+        row_title_gp = gpar(fontsize = 13.2,
+                            fontface = "bold", 
+                            col = "grey36",
+                            fontfamily="Roboto Condensed"),
+        column_title_gp = gpar(fontsize = 13.2,
+                               fontface = "bold", 
+                               col = "grey36",
+                               family="Roboto Condensed"),
+        column_labels = gpar(fontsize = 13.2,
+                               fontface = "bold", 
+                               col = "grey36",
+                               family="Roboto Condensed"),
+        heatmap_legend_param=list(labels_gp = gpar(fontsize = 10, 
+                                   fontface = "bold", 
+                                   col = "grey36",
+                                   fontfamily="Roboto Condensed"),
+                  title_gp = gpar(fontsize = 8, 
+                                     fontface = "bold", 
+                                     col = "grey36",
+                                     fontfamily="Roboto Condensed"),
+                  title_position = "lefttop-rot"))
+#some plotting madness for the massive plot
+#So we can import it into a ggplot object
+#grob = grid.grabExpr(draw(ht,annotation_legend_side="bottom",heatmap_legend_side="left")) 
+#grob_gg <- ggdraw(grob)
+#draw the big plot
+#ab_plot <- (grob_gg| plot_spacer()| (ps_cor_plot / ps_dif_ab)) + 
+#  plot_annotation(tag_levels = "A") + 
+#  plot_layout(widths = c(2.5,0.5,1))
+#ggsave("ab_plot.svg", plot = ab_plot, device = "svg", width = 15, height = 10, units = "in")
+```
+7. prep the GWAS stuff
+```{r}
+#So here is some disconnect between the GWAS pipeline and the R script
+#I note when there are gaps
+#Here we just select the taxa of interst and transform them into a normal distribution
+#I only include this here just for the sake of openess but
+#the rest of the data wranling has already been output in a file I read in later, its just boring merging of a bunch of values
+subset_data <- data.frame(sample_data(physeq_norm))
+#now get the relative abundances of the samples that constitute over 3% of the total relative abundance accross our sample subse whoich are the 7 most abundant familes
+new_TopNOTUS <- names(sort(taxa_sums(physeq_norm),TRUE)[1:7])
+subset_ASVs <- data.frame(t(otu_table(physeq_norm)))
+asv_top_7 <- subset_ASVs %>% select(all_of(new_TopNOTUS))
+
+##ALSO INT transform the ASVs
+#int_function
+qtrans <-
+  function(x){
+    k<-!is.na(x)
+    ran<-rank(x[k])
+    y<-qnorm((1:sum(k)-0.5)/sum(k))
+    x[k]<-y[ran]
+    x
+  }
+#Transform all of the individaul relative abundances with INT transformation with the zero´s included
+int_asv <- mutate_all(asv_top_7,qtrans)
+colnames(int_asv) <- paste(colnames(int_asv),"INT",sep="_")
+#This is then merged with a bunch of stuff in a file aptly named full_manuscript_metadata_corrected_new.csv
+#Here we go away from R and conduct all the quant gen stuff in GCTA you can find that elsewhere in this repo
+#first we just read in a random file for setting the thresholds for the GWAS, its the same for all
+gwasResults_4 = read.table("gwas_loco_ms_4.loco.mlma", header = TRUE) %>% mutate(ori="Mean gill score")
+# Calculate the 5% significance level for the genome-wide ("Thrgen") and the chromosome-wide ("Thrchr") levels
+  Thrgen = -log10(0.05/nrow(gwasResults_4))
+  Thrchr = -log10(0.05/(nrow(gwasResults_4)/29))
+#Now we load in the rest of the GWAS results that showed suggestive SNPS
+gwasResults6 = read.table("gwas_loco_ms_6.loco.mlma", header = TRUE) %>% mutate(ori="Beta diversity Axis.2")
+gwasResults7 = read.table("gwas_loco_ms_7.loco.mlma", header = TRUE) %>% mutate(ori="Alpha diversity(q=0)")
+gwasResults19 = read.table("gwas_loco_ms_19.loco.mlma", header = TRUE) %>% mutate(ori="Relative abundance Vibrionaceae")
+gwasResults <- rbind(gwasResults4,gwasResults6,gwasResults7,gwasResults19)
+
+#Here is the code for generating the merged manhattan plot
+data_cum <- gwasResults %>%
+    group_by(Chr) %>%
+    summarise(max_bp = max(bp)) %>%
+    mutate(bp_add = lag(cumsum(as.numeric(max_bp)), default = 0)) %>%
+    select(Chr, bp_add)
+
+gwas_data <- gwasResults %>%
+    inner_join(data_cum, by = "Chr") %>%
+    mutate(bp_cum = bp + bp_add)
+
+axis_set <- gwas_data %>%
+    group_by(Chr) %>%
+    summarize(center = mean(bp_cum))
+
+ylim <- gwas_data %>%
+    filter(p == min(p)) %>%
+    mutate(ylim = abs(floor(log10(p))) + 2) %>%
+    pull(ylim)
+
+# Define a custom color palette for chromosomes
+color_palette <- rep(c("grey20", "darkgrey"), length.out = length(unique(gwas_data$Chr)))
+
+# Create the Manhattan plot
+gwas_merged <- ggplot(gwas_data, aes(x = bp_cum, y = -log10(p))) +
+    geom_hline(yintercept = Thrgen, linetype = "dashed", color = "red") +
+    geom_hline(yintercept = Thrchr, linetype = "dashed", color = "blue") +
+    
+    # Points for significant p-values, colored by 'ori'
+    geom_point(data = gwas_data %>% filter(-log10(p) >= Thrchr), 
+               aes(color = ori, size = -log10(p)), 
+               alpha = 0.75) +
+    
+    # Points for non-significant p-values, with alternating colors based on chromosome
+    geom_point(data = gwas_data %>% filter(-log10(p) < Thrchr), 
+               aes(color = factor(Chr), size = -log10(p)), 
+               alpha = 0.2) +
+    
+    # Text labels for significant SNPs, colored by 'ori'
+    geom_text(data = gwas_data %>% filter(-log10(p) >= Thrchr), 
+              aes(label = SNP, color = ori), 
+              hjust = -0.1, vjust = 0, 
+              size = 4) +
+    
+    scale_x_continuous(label = axis_set$Chr, breaks = axis_set$center) +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, ylim)) +
+    scale_color_manual(values = c(color_palette, rep(ugly[1:4], length.out = length(unique(gwas_data$ori))))) +
+    
+    theme_minimal() +
+    labs(x = "Chromosome", y = "-log10 P-value", title = "Merged GWAS results") +
+    theme(legend.position="none",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.title = element_text(face = "bold", color = "grey36", family = "Roboto Condensed", size = 15),
+        axis.text.x = element_text(face = "bold", vjust = 0.5, color = "grey36", family = "Roboto Condensed", size = 10),
+        axis.text.y = element_text(color = "grey36", family = "Roboto Condensed", face = "bold", size = 8),
+        axis.ticks = element_line(color = "grey36"),
+        axis.line = element_line(color = "grey36"),
+        title = element_text(face = "bold", color = "grey36", family = "Roboto Condensed", size = 15)
+    )
+gwas_merged
+#We also make seperate mahattan plots for the all the phenotypes in a loop but thats too much here, you can find them in supplementary or modify the code above
+#here we make the qqplots for the phenotypes with suggestive SNPS
+gwas_data <-gwasResults %>%
+  group_by(ori) %>%
+  arrange(p) %>%  # Sort p-values within each group
+  mutate(
+    observed = -log10(p),                   # Observed values (sorted)
+    expected = -log10(ppoints(n()))         # Expected values based on group size
+  ) %>%
+  ungroup()
+
+# Calculate genomic inflation factor (lambda) for each group
+lambda_gc <- gwas_data %>%
+  group_by(ori) %>%
+  summarize(lambda = round(median(qchisq(1 - p, 1)) / qchisq(0.5, 1), 3))
+
+# Merge lambda values back into the original data
+gwas_data <- gwas_data %>%
+  left_join(lambda_gc, by = "ori")
+
+# Create the QQ plot with different colors for each group
+qq_merged <- ggplot(gwas_data, aes(x = expected, y = observed, color = ori)) +
+    geom_point(alpha = 0.5, size = 2) +                        # Points for QQ plot
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed",   # Reference line
+                color = "red") +
+    theme_cowplot() +
+    labs(
+        title = "QQ plot of GWAS p-values by group",
+        x = "Expected -log10(p)",
+        y = "Observed -log10(p)"
+    ) +
+    # Calculate text positions for lambda annotations
+    geom_text(data = lambda_gc, 
+              aes(x = max(gwas_data$expected) * 0.8, 
+                  y = min(gwas_data$observed) + seq(0, by = 0.5, length.out = nrow(lambda_gc)),
+                  label = paste0("λ = ", lambda), color = ori),
+              size = 4, hjust = -0.7, vjust = 1, 
+              show.legend = FALSE) +
+    scale_color_manual(values = ugly) +
+    theme(
+        legend.position = "bottom",  # Move the legend to the bottom
+        legend.box = "vertical",     # Make sure the legend box is vertical
+        legend.title = element_blank(),  # Remove legend title if needed
+        legend.key = element_blank(),  # Remove legend key background
+        legend.text = element_text(size = 10,color="grey36",family="Roboto Condensed"),
+        axis.title = element_text(face="bold",color="grey36",family="Roboto Condensed",size=15),
+            axis.text.x = element_text(face="bold",angle=45,vjust=0.5,color="grey36",family="Roboto Condensed",size=10),
+            axis.text.y = element_text(color="grey36",family="Roboto Condensed",face="bold",size=8),
+            axis.ticks = element_line(color="grey36"),
+            axis.line = element_line(color="grey36"),
+            title=element_text(face="bold",color="grey36",family="Roboto Condensed",size=15)# Adjust legend text size if needed
+    ) # Customize colors if needed
+
+#Here make a manhattanplot for the peak observed on chromosome 10 for three bacterial traits
+gwas_10_beta <- read.table("gwas_loco_ms_6.loco.mlma", header = TRUE) %>% 
+  filter(Chr==10) %>% 
+  filter(bp<30000000) %>% 
+  mutate(ori="Beta diversity axis.2")
+gwas_10_alpha <- read.table("gwas_loco_ms_7.loco.mlma", header = TRUE) %>% 
+  filter(Chr==10) %>% 
+  filter(bp<30000000) %>% 
+  mutate(ori="Alpha diversity (q=0)")
+gwas_10_arco <- read.table("gwas_loco_ms_18.loco.mlma", header = TRUE) %>% 
+  filter(Chr==10) %>% 
+  filter(bp<30000000) %>% 
+  mutate(ori="Relative abundance Arcobacteraceae")
+
+#sidequest to get the top SNP for the arcobacteraceae peak 
+gwas_10_arco %>% mutate(lol=-log10(p)) %>% filter(lol>4)
+#sidequest over
+chr10 <- rbind(gwas_10_beta,gwas_10_alpha,gwas_10_arco)
+
+#Get the top SNPs on chr 10 for each phenotype
+ chr10 %>% mutate(value=-log10(p)) %>% 
+    group_by(ori) %>% slice_max(order_by = value, n = 1, with_ties = FALSE) %>%
+    ungroup()
+
+
+ggman_chr <- function(gwasResults, title_name) {
+    # Calculate the cumulative base pair positions
+    data_cum <- gwasResults %>%
+        group_by(Chr) %>%
+        summarise(max_bp = max(bp)) %>%
+        mutate(bp_add = lag(cumsum(as.numeric(max_bp)), default = 0)) %>%
+        select(Chr, bp_add)
+    
+    # Create the data frame for the plot
+    gwas_data <- gwasResults  %>%
+        inner_join(data_cum, by = "Chr")  %>%
+        mutate(bp_cum = bp + bp_add)
+    
+    # Calculate the axis settings
+    axis_set <- gwas_data  %>%
+        group_by(Chr)  %>%
+        summarize(center = mean(bp_cum))
+    
+    # Calculate the y-axis limit
+    ylim <- gwas_data  %>%
+        filter(p == min(p))  %>%
+        mutate(ylim = abs(floor(log10(p))) + 2)  %>%
+        pull(ylim)
+    #Get the max log(-p) lables
+  #gwas_data_max <- gwas_data %>%
+  #group_by(ori) %>%
+  #filter(-log10(p) == max(-log10(p)))
+    
+    # Create the Manhattan plot
+    ggplot(gwas_data, aes(x = bp_cum, y = -log10(p), color = ori, size = -log10(p))) +
+        geom_hline(yintercept = Thrgen, linetype = "dashed", color = "blue") +
+        geom_hline(yintercept = Thrchr, linetype = "dashed", color = "red") + 
+        geom_point(data = gwas_data %>% filter(-log10(p) >= Thrchr), 
+                aes(x = bp_cum, y = -log10(p)), 
+                 color = "#C15444", 
+                 alpha = 0.75, size = 2, 
+                 inherit.aes = FALSE) +
+        #geom_text(data = gwas_data_max, 
+         #     aes(x = bp_cum, y = -log10(p), paste0(round(bp / 1e6, 2), " Mbp"))), 
+          #    hjust = -0.1, vjust = 0, size = 4, color = "grey36") +
+        geom_point(data = gwas_data %>% filter(-log10(p) < Thrchr), 
+                   aes(x = bp_cum, y = -log10(p)), 
+                   alpha = 0.6, size = 2) +
+        scale_x_continuous(
+        name = "Position on chromosome 10 (Mbp)", 
+        breaks = seq(0, 30e6, by = 4e6), 
+        labels = function(x) paste0(x / 1e6, " Mbp")) +
+        scale_y_continuous(expand = c(0, 0), limits = c(0, ylim)) +
+        scale_color_manual(values = c("#C15444","#C1B244","#7BC153"),
+            unique(length(axis_set$Chr))
+        ) + 
+        theme_minimal() +
+        guides(color=guide_legend(title="Phenotype")) +
+        labs(y = "-log10 P-value", title = title_name) +
+        theme(
+            panel.grid.major.x = element_blank(),
+            panel.grid.minor.x = element_blank(),
+            axis.title = element_text(face="bold",color="grey36",family="Roboto Condensed",size=13),
+            axis.text.x = element_text(face="bold",vjust=0.5,color="grey36",family="Roboto Condensed",size=10),
+            axis.text.y = element_text(color="grey36",family="Roboto Condensed",face="bold",size=8),
+            axis.ticks = element_line(color="grey36"),
+            axis.line = element_line(color="grey36"),
+            title=element_text(face="bold",color="grey36",family="Roboto Condensed",size=15),
+            legend.position = "bottom",
+            legend.text = element_text(face="bold",color="grey36",family="Roboto Condensed",size=10)
+        )
+  
+}
+
+
+gwas_chr10 <- ggman_chr(chr10,"GWAS peak on chromosome 10 for relevant  groups") 
+gwas_chr10
+```
+8. Now onto allele substitution effects
+```{r}
+alle_inf <- read.delim("test.xmat")
+
+subst_eff <- alle_inf %>%
+  select(-c("POS","A1","A2","AF","NCHROBS")) %>% 
+  pivot_longer(cols = 3:60) %>% mutate(value=factor(value)) %>%
+  pivot_wider(names_from = 1:2) %>% 
+  cbind(full_manuscript_metadata_corrected_new) %>%
+  select(-id) %>%
+  clean_names()
+ 
+#Now to the plotting
+#first set for stat
+my_comparisons <- list( c("0", "1"), c("1", "2"), c("0", "2") )
+
+#we start with gill score
+gs_snps_plot <- ggplot(subst_eff,aes(x=x4_ax_87955988,y=mngill,fill=x4_ax_87955988,color=x4_ax_87955988)) + 
+  geom_violin(alpha=0.6,color="white") + 
+  geom_jitter(color="grey36",alpha=0.5,fill="grey36") +
+  stat_compare_means(label = "p.signif",comparisons = my_comparisons,font.family="Roboto Condensed",size=6,color="grey36")+
+  scale_fill_manual(values=ugly) +
+  scale_color_manual(values=ugly) +
+  scale_x_discrete(labels=c("AA","AB","BB")) +
+   scale_y_continuous(breaks = c(2, 3, 4, 5), 
+                     limits = c(2, 5)) +
+  theme_cowplot() +
+  labs(x="Genotype at SNP AX-87955988",y="Mean gill score") +
+  theme(
+    text = element_text(color="grey36",family="Roboto Condensed"),
+    axis.text.x = element_text(face="bold",color="grey36",family="Roboto Condensed"),
+    axis.text.y = element_text(color="grey36",family="Roboto Condensed",face="bold"),
+    axis.ticks = element_line(color="grey36"),
+    axis.line = element_line(color="grey36"),
+    axis.title = element_text(face="bold",color="grey36",size=14),
+    legend.position = "none",
+    line = element_line(color="grey36"),plot.tag.position = "bottom") 
+
+alpha_snp_plot_10 <- subst_eff %>%
+  drop_na(x10_ax_87891546) %>%
+ggplot(aes(x=x10_ax_87891546,y=richness,fill=x10_ax_87891546,color=x10_ax_87891546)) + 
+  geom_violin(alpha=0.6,color="white") + 
+  geom_jitter(color="grey36",alpha=0.5,fill="grey36") +
+  stat_compare_means(label = "p.signif",comparisons = my_comparisons,font.family="Roboto Condensed",size=6,color="grey36")+
+  scale_fill_manual(values=ugly) +
+  scale_color_manual(values=ugly) +
+  scale_x_discrete(labels=c("BB","AB","BB")) +
+  theme_cowplot() +
+  labs(x="Genotype at SNP AX-87891546",y="Alpha diversity (q=0)") +
+  theme(
+    text = element_text(color="grey36",family="Roboto Condensed"),
+    axis.text.x = element_text(face="bold",color="grey36",family="Roboto Condensed"),
+    axis.text.y = element_text(color="grey36",family="Roboto Condensed",face="bold"),
+    axis.ticks = element_line(color="grey36"),
+    axis.line = element_line(color="grey36"),
+    axis.title = element_text(face="bold",color="grey36",size=14),
+    legend.position = "none",
+    line = element_line(color="grey36"),plot.tag.position = "bottom") 
+  
+
+alpha_snp_plot_3 <-
+ggplot(subst_eff,aes(x=x3_ax_88304640,y=richness,fill=x3_ax_88304640,color=x3_ax_88304640)) + 
+  geom_violin(alpha=0.6,color="white") + 
+  geom_jitter(color="grey36",alpha=0.5,fill="grey36") +
+  stat_compare_means(label = "p.signif",font.family="Roboto Condensed",size=6,color="grey36")+
+  scale_fill_manual(values=ugly) +
+  scale_color_manual(values=ugly) +
+  scale_x_discrete(labels=c("BB","AB","BB")) +
+  theme_cowplot() +
+  labs(x="Genotype at SNP AX-88304640",y="Alpha diversity (q=0)") +
+  theme(
+    text = element_text(color="grey36",family="Roboto Condensed"),
+    axis.text.x = element_text(face="bold",color="grey36",family="Roboto Condensed"),
+    axis.text.y = element_text(color="grey36",family="Roboto Condensed",face="bold"),
+    axis.ticks = element_line(color="grey36"),
+    axis.line = element_line(color="grey36"),
+    axis.title = element_text(face="bold",color="grey36",size=14),
+    legend.position = "none",
+    line = element_line(color="grey36"),plot.tag.position = "bottom") 
+
+  
+vib_snp_plot <- ggplot(subst_eff,aes(x=x2_ax_88265562,y=asv_17_int,fill=x2_ax_88265562,color=x2_ax_88265562)) + 
+  geom_violin(alpha=0.6,color="white") + 
+  geom_jitter(color="grey36",alpha=0.5,fill="grey36") +
+  stat_compare_means(label = "p.signif",comparisons = my_comparisons,font.family="Roboto Condensed",size=6,color="grey36")+
+  scale_fill_manual(values=ugly) +
+  scale_color_manual(values=ugly) +
+  scale_x_discrete(labels=c("BB","AB","BB")) +
+  theme_cowplot() +
+  labs(x="Genotype at SNP AX-88265562",y="Relative abundance Vibrionaceae (INT transformed)") +
+  theme(
+    text = element_text(color="grey36",family="Roboto Condensed"),
+    axis.text.x = element_text(face="bold",color="grey36",family="Roboto Condensed"),
+    axis.text.y = element_text(color="grey36",family="Roboto Condensed",face="bold"),
+    axis.ticks = element_line(color="grey36"),
+    axis.line = element_line(color="grey36"),
+    axis.title = element_text(face="bold",color="grey36",size=14),
+    legend.position = "none",
+    line = element_line(color="grey36"),plot.tag.position = "bottom")
+
+beta_snp_plot <- ggplot(subst_eff,aes(x=axis_1,y=axis_2,color=x18_ax_88127064)) + 
+  geom_point(size=5) +
+  scale_color_manual(values=ugly,name="Genotype at SNP AX-88127064",labels=c("AA","AB","BB")) +
+  theme_cowplot() +
+  labs(x="Axis.1",y="Axis.2") +
+  theme(
+    text = element_text(color="grey36",family="Roboto Condensed"),
+    axis.text.x = element_text(face="bold",color="grey36",family="Roboto Condensed"),
+    axis.text.y = element_text(color="grey36",family="Roboto Condensed",face="bold"),
+    axis.ticks = element_line(color="grey36"),
+    axis.line = element_line(color="grey36"),
+    axis.title = element_text(face="bold",color="grey36",size=14),
+    legend.position = "bottom") 
+#some mad plotting
+#plot1 <- gs_snps_plot / beta_snp_plot
+#plot2 <- alpha_snp_plot_3 + alpha_snp_plot_10
+#plot3 <- plot2 / vib_snp_plot
+
+# Combine everything with explicit tagging and make it more lovely
+#final_plot <- (plot1 | plot3) + plot_annotation(tag_levels = "A") 
+#ggsave("ase_plot.svg", plot = final_plot, device = "svg", width = 15, height = 10, units = "in")
+
+#the tables for heritability estimates are easily gotten from the GCTA process amd are included in the repo so enjoy
+#here´s how to get the top SNPS if youse made it this far and are super enthusiastic about it
+top_snps_table <- gwasResults  %>% mutate(value=-log10(p)) %>% filter(value>=Thrchr)
+ft <- top_snps_table %>% mutate(Chromosome=Chr,"position(bp)"=bp,Minor=A1,Major=A2,Frequency=round(Freq,3),"SNP effect"=round(b,3),"p-value"=p,Phenotype=ori,SE=round(se,3)) %>% select(-c(Chr,bp,p,A1,A2,Freq,value,b,ori,se))
+ft
+#fun
+#done
+
+```
