@@ -1,0 +1,15 @@
+#this is a combination of one-liners form GCTA which were used sepereately for proper scrutiny ,
+I´ve included them in one script for simplicities sake
+#However first we construct a GRM
+gcta63 --bfile my_final_subset_U --autosome-num 29 --make-grm --out GRM --thread-num 4
+STORE=/path/to/working/directory
+col=$(cat $STORE/path/to/file/listing/column_numbers_to_use)
+for a in $col
+do
+#for reml and heritability estimates
+gcta64 --reml --grm /path/to/GRM --pheno  $STORE/"$a"_ms.pheno --out $STORE/reml_"$a"_all_pheno
+#for normal mlma
+gcta64 --mlma --bfile $STORE/my_final_subset_U --grm /path/to/GRM --autosome-num 29 --pheno $STORE/"$a"_ms.pheno --out $STORE/gwas_ms_"$a" > $STORE/gwas_ms_"$a".log
+#for mlma-loco
+gcta64 --mlma-loco --bfile $STORE/my_final_subset_U --grm /path/to/GRM --autosome-num 29 --pheno $STORE/"$a"_ms.pheno --out $STORE/gwas_loco_ms_"$a" > $STORE/gwas_loco_ms_"$a".log
+done
