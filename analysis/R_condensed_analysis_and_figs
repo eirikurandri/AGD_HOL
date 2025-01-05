@@ -526,7 +526,7 @@ qtrans <-
 #Transform all of the individaul relative abundances with INT transformation with the zero´s included
 int_asv <- mutate_all(asv_top_7,qtrans)
 colnames(int_asv) <- paste(colnames(int_asv),"INT",sep="_")
-#This is then merged with a bunch of stuff in a file aptly named full_manuscript_metadata_corrected_new.csv
+#This is then merged with a bunch of stuff in a file aptly named manuscript_full_pheno.csv
 #Here we go away from R and conduct all the quant gen stuff in GCTA you can find that elsewhere in this repo
 #first we just read in a random file for setting the thresholds for the GWAS, its the same for all
 gwasResults_4 = read.table("gwas_loco_ms_4.loco.mlma", header = TRUE) %>% mutate(ori="Mean gill score")
