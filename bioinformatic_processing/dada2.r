@@ -74,7 +74,7 @@ summary_tab <- data.frame(row.names=sample.names, dada2_input=filtered_out[,1],
                           dada_r=sapply(dada_reverse, getN), merged=sapply(merged_amplicons, getN),
                           nonchim=rowSums(seqtab.nochim),
                           final_perc_reads_retained=round(rowSums(seqtab.nochim)/filtered_out[,1]*100, 1))
-write.table(summary_tab, "summary_reads_table_CRISPR_full_new_Trunclen200_180_O2.txt", sep="\t", quote=F)
+write.table(summary_tab, "summary_reads_table.txt", sep="\t", quote=F)
 
 
 #Assigning taxonomy(before this step, download the database, at: https://zenodo.org/record/1172783#.XzvzQJMzbmE)
