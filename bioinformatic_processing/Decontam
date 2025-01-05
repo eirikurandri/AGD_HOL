@@ -1,0 +1,60 @@
+#Call the neccesssary libraries
+library(dplyr)
+library(tidyverse)
+library(phyloseq)
+library(decontam)
+
+#Load in data
+meta <- read.csv("metadata.csv" , sep=",",stringsAsFactors = TRUE)
+asv.tab <- read.delim("ASVs_counts.tsv")
+asv.taxa <- read.delim("ASVs_taxonomy.tsv")
+
+rownames(asv.tab) <- asv.tab$X
+asv.tab <- asv.tab %>% select(-X)
+rownames(meta) <- colnames(asv.tab)
+rownames(asv.taxa) <- asv.taxa$X
+asv.taxa <- asv.taxa %>% select(-X)
+
+asv.taxa.df <- as.data.frame(asv.taxa)
+asv.taxa.df$ASV.ID <- row.names(asv.taxa.df)
+
+#make phyloseq object
+ps <- phyloseq(otu_table(asv.tab, taxa_are_rows=TRUE),
+                  tax_table(as.matrix(asv.taxa)),
+                  sample_data(meta)
+               )
+
+#plot_library_size
+df <- as.data.frame(sample_data(ps))
+df$LibrarySize <- sample_sums(ps)
+df <- df[order(df$LibrarySize),]
+df$Index <- seq(nrow(df))
+fullsize <- ggplot(data=df, aes(x=Index, y=LibrarySize, color=Sample_orf_control)) + geom_point() 
+#looks good, the controls are at the bottom, therefore likely no contamination
+
+#start decontamination
+sample_data(ps)$is.neg <- sample_data(ps)$Sample_orf_control == "CONTROL_SAMPLE"
+#Then exclude the positive control, we don´t want that to interfere with the process, since its not a blank and not a sample. 
+ps_no_pos <- subset_samples(ps,Sample_ID!="Gpositivecontrol")
+contam.prev05 <- isContaminant(ps_no_pos, method="prevalence", neg="is.neg",threshold=0.5)
+ps.filt.prev05 <- prune_taxa(!contam.prev05$contaminant,ps)
+
+
+
+#Some sanity check of where the contaminants are present based on abundance yay.
+
+ps.pa <- transform_sample_counts(ps, function(x) x/sum(x))
+ps.pa.neg <- prune_samples(sample_data(ps.pa)$Sample_orf_control == "CONTROL_SAMPLE", ps.pa)
+ps.pa.pos <- prune_samples(sample_data(ps.pa)$Sample_orf_control == "TRUE_SAMPLE", ps.pa)
+# Make data.frame of prevalence in positive and negative samples
+df.pa <- data.frame(pa.pos=taxa_sums(ps.pa.pos), pa.neg=taxa_sums(ps.pa.neg),
+contaminant=contam.prev05$contaminant)
+
+ggplot(data=df.pa, aes(x=pa.neg, y=pa.pos, color=contaminant)) + geom_point() +
+  xlab("Prevalence (Negative Controls)") + ylab("Prevalence (True Samples)")
+
+#create new ASV_tables and such for use in LULU
+
+write.table(ps.filt.prev05@otu_table,"ASV_counts_deconprev05.tsv",sep="\t", quote=F, col.names=NA)
+write.table(ps.filt.prev05@tax_table, "ASVs_taxonomy_deconprev05.tsv",sep="\t", quote=F, col.names=NA)
+write.table(taxa_prevalence05, "contam_taxa.tsv",sep="\t", quote=F, col.names=NA)
