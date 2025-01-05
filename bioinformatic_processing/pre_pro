@@ -1,0 +1,11 @@
+
+#trimgalore_for_raw_reads
+parallel --xapply trim_galore --nextera --paired --fastqc -o trim_galore/ ::: *_R1_001.fastq.gz ::: *_R2_001.fastq.gz
+#fastqc_for_output
+file=`ls -a *fq.gz | sort` #  specify the inputs
+fastqc $file -o $output_directory/
+#2Then split the fastQC reports into subdirectories with_forward_and reverse reads sperate
+#3 Load and_run multiQC on_forward_and reverse_reads
+multiqc '<path/to/forwardFASTQ/>' --filename multiqc_data_forward
+multiqc '<path/to/reverseFASTQ/>' --filename multiqc_data_reverse
+#These reports are then_used to_inform about the dada2 parameters
