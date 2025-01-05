@@ -53,8 +53,7 @@ contaminant=contam.prev05$contaminant)
 ggplot(data=df.pa, aes(x=pa.neg, y=pa.pos, color=contaminant)) + geom_point() +
   xlab("Prevalence (Negative Controls)") + ylab("Prevalence (True Samples)")
 
-#create new ASV_tables and such for use in LULU
-
-write.table(ps.filt.prev05@otu_table,"ASV_counts_deconprev05.tsv",sep="\t", quote=F, col.names=NA)
-write.table(ps.filt.prev05@tax_table, "ASVs_taxonomy_deconprev05.tsv",sep="\t", quote=F, col.names=NA)
-write.table(taxa_prevalence05, "contam_taxa.tsv",sep="\t", quote=F, col.names=NA)
+#create new ASV_tables and such for use in LULU if you like
+#write.table(ps.filt.prev05@otu_table,"ASV_counts_deconprev05.tsv",sep="\t", quote=F, col.names=NA)
+#write.table(ps.filt.prev05@tax_table, "ASVs_taxonomy_deconprev05.tsv",sep="\t", quote=F, col.names=NA)
+#write.table(taxa_prevalence05, "contam_taxa.tsv",sep="\t", quote=F, col.names=NA)
